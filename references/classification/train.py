@@ -6,6 +6,7 @@ import warnings
 import presets
 import torch
 import torch.utils.data
+import torch.nn.functional as F
 import torchvision
 import transforms
 import utils
@@ -13,9 +14,16 @@ from sampler import RASampler
 from torch import nn
 from torch.utils.data.dataloader import default_collate
 from torchvision.transforms.functional import InterpolationMode
+from copy import deepcopy
+
+import shutil
+from nncf import NNCFConfig
+from nncf.torch import register_default_init_args
+from nncf.torch import create_compressed_model
 
 try:
     import wandb
+
     has_wandb = True
 except ImportError: 
     has_wandb = False
@@ -234,6 +242,44 @@ def main(args):
     print("Creating model")
     model = torchvision.models.__dict__[args.model](weights=args.weights, num_classes=num_classes, use_hf_mha=args.use_hf_mha)
     model.to(device)
+
+    compression_ctrl = None
+    if args.nncf_config is not None:
+        nncf_config = NNCFConfig.from_json(args.nncf_config)
+        nncf_config["log_dir"] = args.output_dir
+        if utils.is_main_process():
+            shutil.copy(args.nncf_config, args.output_dir)
+
+        # if (args.manual_load is not None or args.max_steps > 0) and "compression" in nncf_config:
+        #     # save the calibration time for manual load
+        #     override_qcfg_init = dict(
+        #         range=dict(num_init_samples=32), batchnorm_adaptation=dict(num_bn_adaptation_samples=32)
+        #     )
+        #     override_pcfg_param = dict(steps_per_epoch=args.max_steps)
+        #     if isinstance(nncf_config["compression"], list):
+        #         for algo in nncf_config["compression"]:
+        #             if algo["algorithm"] == "quantization":
+        #                 algo["initializer"].update(override_qcfg_init)
+        #             if algo["algorithm"] == "movement_sparsity" and args.max_steps > 0:
+        #                 algo["params"].update(override_pcfg_param)
+        #     elif nncf_config["compression"]["algorithm"] == "quantization":
+        #         nncf_config["compression"]["initializer"].update(override_qcfg_init)
+        #     elif nncf_config["compression"]["algorithm"] == "movement_sparsity" and args.max_steps > 0:
+        #         nncf_config["compression"]["params"].update(override_pcfg_param)
+
+        init_loader = deepcopy(data_loader)
+        nncf_config = register_default_init_args(
+            nncf_config=nncf_config, train_loader=init_loader
+        )
+
+        compression_ctrl, model = create_compressed_model(model, nncf_config)
+
+        # if args.manual_load is not None:
+        #     model.load_state_dict(torch.load(args.manual_load, map_location="cpu")["model"])
+        #     print(f"Loaded model state from: {args.manual_load}")
+        # # else:
+        # #     torch.save({'model': model.state_dict()}, '/home/yujiepan/work2/jpqd-vit/LOGS/ptq_model/jpq-pytorch.v3-512.bin')
+        # print("\n".join(sorted(model.state_dict().keys())))
 
     if args.distributed and args.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -530,6 +576,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--use-hf-mha", dest="use_hf_mha", help="Only test the model", action="store_true")
     parser.add_argument('--wandb_id', default=None, type=str, 
                         help='run identifier for wandb dashboard')
+    parser.add_argument("--nncf_config", default=None, type=str, help="path to nncf config json file")
     return parser
 
 

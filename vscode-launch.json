@@ -50,14 +50,43 @@
             "justMyCode": false
         },
         {
+            "name": "[torchvision] Eval ImgNet-1k FP32 (NNCFNetwork)",
+            "type": "python",
+            "request": "launch",
+            "module": "torch.distributed.run",
             "env": {
                 "PYTHONPATH": "/data5/vchua/dev/sixer-tv-nncf/torchvision/"
                 // "CUDA_VISIBLE_DEVICES": ""
             },
+            "cwd": "${workspaceFolder}/torchvision/references/classification",
+            "args": [
+                "--nproc_per_node", "1",
+                "train.py",
+                "--test-only",
+                "--use-hf-mha",
+                "--model", "vit_b_32",
+                "--weights", "ViT_B_32_Weights.IMAGENET1K_V1",
+                "-j", "8",
+                "-b", "256",
+                "--nncf_config",
+                    "nncfcfg/vit-b-imgnet1k.json",
+                "--output-dir", 
+                    "/tmp/vscode-dev/tv-nncf/eval",
+                "--data-path",
+                    "/data1/dataset/imagenet/ilsvrc2012/torchvision/"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
             "name": "[torchvision] Eval ImgNet-1k FP32",
             "type": "python",
             "request": "launch",
             "module": "torch.distributed.run",
+            "env": {
+                "PYTHONPATH": "/data5/vchua/dev/sixer-tv-nncf/torchvision/"
+                // "CUDA_VISIBLE_DEVICES": ""
+            },
             "cwd": "${workspaceFolder}/torchvision/references/classification",
             "args": [
                 "--nproc_per_node", "1",
