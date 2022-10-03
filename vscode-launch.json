@@ -51,6 +51,7 @@
         },
         {
             "env": {
+                "PYTHONPATH": "/data5/vchua/dev/sixer-tv-nncf/torchvision/"
                 // "CUDA_VISIBLE_DEVICES": ""
             },
             "name": "[torchvision] Eval ImgNet-1k FP32",
@@ -59,9 +60,10 @@
             "module": "torch.distributed.run",
             "cwd": "${workspaceFolder}/torchvision/references/classification",
             "args": [
-                "--nproc_per_node", "2",
+                "--nproc_per_node", "1",
                 "train.py",
                 "--test-only",
+                // "--use-hf-mha",
                 "--model", "vit_b_32",
                 "--weights", "ViT_B_32_Weights.IMAGENET1K_V1",
                 "-j", "16",

@@ -232,7 +232,7 @@ def main(args):
     )
 
     print("Creating model")
-    model = torchvision.models.__dict__[args.model](weights=args.weights, num_classes=num_classes)
+    model = torchvision.models.__dict__[args.model](weights=args.weights, num_classes=num_classes, use_hf_mha=args.use_hf_mha)
     model.to(device)
 
     if args.distributed and args.sync_bn:
@@ -527,6 +527,7 @@ def get_args_parser(add_help=True):
         "--ra-reps", default=3, type=int, help="number of repetitions for Repeated Augmentation (default: 3)"
     )
     parser.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
+    parser.add_argument("--use-hf-mha", dest="use_hf_mha", help="Only test the model", action="store_true")
     parser.add_argument('--wandb_id', default=None, type=str, 
                         help='run identifier for wandb dashboard')
     return parser

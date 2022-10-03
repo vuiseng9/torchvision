@@ -2,6 +2,7 @@ import math
 from collections import OrderedDict
 from functools import partial
 from typing import Any, Callable, List, NamedTuple, Optional, Dict
+from sqlalchemy import false
 
 import torch
 import torch.nn as nn
@@ -94,16 +95,22 @@ class EncoderBlock(nn.Module):
         dropout: float,
         attention_dropout: float,
         norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
+        use_hf_mha: bool = False
     ):
         super().__init__()
+        self.use_hf_mha = use_hf_mha
         self.num_heads = num_heads
 
         # Attention block
         self.ln_1 = norm_layer(hidden_dim)
-        # self.self_attention = nn.MultiheadAttention(hidden_dim, num_heads, dropout=attention_dropout, batch_first=True)
-        self.self_attention = MultiHeadAttention(
-            hidden_dim, num_heads, dropout=attention_dropout, bias=True
-        )  # use huggingface implementation
+        
+        if self.use_hf_mha is True:
+            self.self_attention = MultiHeadAttention(
+                hidden_dim, num_heads, dropout=attention_dropout, bias=True
+            )  # use huggingface implementation
+        else:
+            self.self_attention = nn.MultiheadAttention(hidden_dim, num_heads, dropout=attention_dropout, batch_first=True)
+
         self.dropout = nn.Dropout(dropout)
 
         # MLP block
@@ -113,8 +120,10 @@ class EncoderBlock(nn.Module):
     def forward(self, input: torch.Tensor):
         torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
         x = self.ln_1(input)
-        # x, _ = self.self_attention(query=x, key=x, value=x, need_weights=False)
-        x, _, _ = self.self_attention(x)
+        if self.use_hf_mha is True:
+            x, _, _ = self.self_attention(x)
+        else:
+            x, _ = self.self_attention(query=x, key=x, value=x, need_weights=False)
         x = self.dropout(x)
         x = x + input
 
@@ -136,15 +145,21 @@ class Encoder(nn.Module):
         dropout: float,
         attention_dropout: float,
         norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
+        use_hf_mha: bool = False
     ):
         super().__init__()
+        self.use_hf_mha = use_hf_mha
         self.seq_length = seq_length
         self.hidden_dim = hidden_dim
+
         # Note that batch_size is on the first dim because
         # we have batch_first=True in nn.MultiAttention() by default
-        # self.pos_embedding = nn.Parameter(torch.empty(1, seq_length, hidden_dim).normal_(std=0.02))  # from BERT
-        self.pos_embedding_layer = nn.Embedding(seq_length, hidden_dim)
-        nn.init.normal_(self.pos_embedding_layer.weight, std=0.02)
+        if self.use_hf_mha is True:
+            self.pos_embedding_layer = nn.Embedding(seq_length, hidden_dim)
+            nn.init.normal_(self.pos_embedding_layer.weight, std=0.02)
+        else:
+            self.pos_embedding = nn.Parameter(torch.empty(1, seq_length, hidden_dim).normal_(std=0.02))  # from BERT
+
         self.dropout = nn.Dropout(dropout)
         layers: OrderedDict[str, nn.Module] = OrderedDict()
         for i in range(num_layers):
@@ -155,14 +170,18 @@ class Encoder(nn.Module):
                 dropout,
                 attention_dropout,
                 norm_layer,
+                self.use_hf_mha
             )
         self.layers = nn.Sequential(layers)
         self.ln = norm_layer(hidden_dim)
 
     def forward(self, input: torch.Tensor):
         torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
-        pos_embedding = self.pos_embedding_layer(torch.arange(self.seq_length, device=input.device).unsqueeze(0))
-        input = input + pos_embedding
+        if self.use_hf_mha is True:
+            pos_embedding = self.pos_embedding_layer(torch.arange(self.seq_length, device=input.device).unsqueeze(0))
+            input = input + pos_embedding
+        else:
+            input = input + self.pos_embedding
         return self.ln(self.layers(self.dropout(input)))
 
 
@@ -183,6 +202,7 @@ class VisionTransformer(nn.Module):
         representation_size: Optional[int] = None,
         norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
         conv_stem_configs: Optional[List[ConvStemConfig]] = None,
+        use_hf_mha: bool = False,
     ):
         super().__init__()
         _log_api_usage_once(self)
@@ -196,6 +216,7 @@ class VisionTransformer(nn.Module):
         self.num_classes = num_classes
         self.representation_size = representation_size
         self.norm_layer = norm_layer
+        self.use_hf_mha = use_hf_mha
 
         if conv_stem_configs is not None:
             # As per https://arxiv.org/abs/2106.14881
@@ -226,8 +247,11 @@ class VisionTransformer(nn.Module):
         seq_length = (image_size // patch_size) ** 2
 
         # Add a class token
-        # self.class_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
-        self.class_token_layer = nn.Embedding(1, hidden_dim)
+        if self.use_hf_mha is True:
+            self.class_token_layer = nn.Embedding(1, hidden_dim)
+            nn.init.zeros_(self.class_token_layer.weight)
+        else:
+            self.class_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         seq_length += 1
 
         self.encoder = Encoder(
@@ -239,6 +263,7 @@ class VisionTransformer(nn.Module):
             dropout,
             attention_dropout,
             norm_layer,
+            self.use_hf_mha
         )
         self.seq_length = seq_length
 
@@ -275,9 +300,6 @@ class VisionTransformer(nn.Module):
             nn.init.zeros_(self.heads.head.weight)
             nn.init.zeros_(self.heads.head.bias)
         
-        if isinstance(self.class_token_layer, nn.Embedding):
-            nn.init.zeros_(self.class_token_layer.weight)
-
     def _process_input(self, x: torch.Tensor) -> torch.Tensor:
         n, c, h, w = x.shape
         p = self.patch_size
@@ -305,8 +327,12 @@ class VisionTransformer(nn.Module):
         n = x.shape[0]
 
         # Expand the class token to the full batch
-        class_token = self.class_token_layer(torch.zeros((1,1), dtype=torch.long, device=x.device))
-        batch_class_token = class_token.expand(n, -1, -1)
+        if self.use_hf_mha is True:
+            class_token = self.class_token_layer(torch.zeros((1,1), dtype=torch.long, device=x.device))
+            batch_class_token = class_token.expand(n, -1, -1)
+        else:
+            batch_class_token = self.class_token.expand(n, -1, -1)
+
         x = torch.cat([batch_class_token, x], dim=1)
 
         x = self.encoder(x)
@@ -344,31 +370,38 @@ def _vision_transformer(
         mlp_dim=mlp_dim,
         **kwargs,
     )
+    if 'use_hf_mha' in kwargs:
+        use_hf_mha = kwargs['use_hf_mha']
+    else:
+        use_hf_mha = False # default is False
 
     if weights:
-        # modify torchvision weight names to fit for HuggingFace MultiHeadAttention implementation
-        state_dict = weights.get_state_dict(progress=progress)
-        state_dict_new = OrderedDict()
-        for key, value in state_dict.items():
-            if key.endswith("self_attention.in_proj_weight"):
-                q, k, v = value.chunk(3, dim=0)
-                key_prefix = key[: key.index("in_proj_weight")]
-                state_dict_new[key_prefix + "q_proj.weight"] = q
-                state_dict_new[key_prefix + "k_proj.weight"] = k
-                state_dict_new[key_prefix + "v_proj.weight"] = v
-            elif key.endswith("self_attention.in_proj_bias"):
-                q, k, v = value.chunk(3, dim=0)
-                key_prefix = key[: key.index("in_proj_bias")]
-                state_dict_new[key_prefix + "q_proj.bias"] = q
-                state_dict_new[key_prefix + "k_proj.bias"] = k
-                state_dict_new[key_prefix + "v_proj.bias"] = v
-            elif key.endswith("class_token"):
-                state_dict_new[key + "_layer.weight"] = value.squeeze(0)
-            elif key.endswith("encoder.pos_embedding"):
-                state_dict_new[key + "_layer.weight"] = value.squeeze(0)
-            else:
-                state_dict_new[key] = value
-        model.load_state_dict(state_dict_new)
+        if use_hf_mha is True:
+            # modify torchvision weight names to fit for HuggingFace MultiHeadAttention implementation
+            state_dict = weights.get_state_dict(progress=progress)
+            state_dict_new = OrderedDict()
+            for key, value in state_dict.items():
+                if key.endswith("self_attention.in_proj_weight"):
+                    q, k, v = value.chunk(3, dim=0)
+                    key_prefix = key[: key.index("in_proj_weight")]
+                    state_dict_new[key_prefix + "q_proj.weight"] = q
+                    state_dict_new[key_prefix + "k_proj.weight"] = k
+                    state_dict_new[key_prefix + "v_proj.weight"] = v
+                elif key.endswith("self_attention.in_proj_bias"):
+                    q, k, v = value.chunk(3, dim=0)
+                    key_prefix = key[: key.index("in_proj_bias")]
+                    state_dict_new[key_prefix + "q_proj.bias"] = q
+                    state_dict_new[key_prefix + "k_proj.bias"] = k
+                    state_dict_new[key_prefix + "v_proj.bias"] = v
+                elif key.endswith("class_token"):
+                    state_dict_new[key + "_layer.weight"] = value.squeeze(0)
+                elif key.endswith("encoder.pos_embedding"):
+                    state_dict_new[key + "_layer.weight"] = value.squeeze(0)
+                else:
+                    state_dict_new[key] = value
+            model.load_state_dict(state_dict_new)
+        else:
+            model.load_state_dict(weights.get_state_dict(progress=progress))
 
     return model
 
